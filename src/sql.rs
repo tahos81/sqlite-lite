@@ -9,7 +9,7 @@ parser! {
               { Statement::Select { columns, table } }
 
         rule column_list() -> Vec<String>
-              = "COUNT(*)" {["COUNT(*)".to_string()].to_vec()} / c:identifier() ** "," { c }
+        = ("COUNT(*)" / "count(*)") {["COUNT(*)".to_string()].to_vec()} / c:identifier() ** "," { c }
 
         rule identifier() -> String
             = quiet!{n:$(['a'..='z' | 'A'..='Z' | '_']['a'..='z' | 'A'..='Z' | '0'..='9' | '_']*) { n.to_string() }}
