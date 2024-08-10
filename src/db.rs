@@ -5,6 +5,7 @@ use crate::{
         Kind,
     },
     record::{ColumnType, Record},
+    sql::Statement,
     Page, DB_HEADER_SIZE,
 };
 use anyhow::{anyhow, Result};
@@ -51,7 +52,38 @@ impl Database {
         Ok(())
     }
 
-    pub fn read_page(&self, page_num: usize) -> Result<Page> {
+    pub fn execute_statement(&self, statement: Statement) -> Result<()> {
+        match statement {
+            Statement::Select { columns, table } => {
+                if columns.len() == 1 && columns[0] == String::from("COUNT(*)") {
+                    let count = self.table_row_count(table.as_str())?;
+                    println!("{}", count);
+                } else {
+                    unimplemented!("SELECT with specific columns is not implemented yet");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn table_row_count(&self, table_name: &str) -> Result<usize> {
+        let schema = self
+            .schema
+            .iter()
+            .find(|s| s.name == table_name && s.kind == schema::Kind::Table)
+            .ok_or(anyhow!("Table not found"))?;
+        let rootpage = schema.rootpage;
+        let page = self.read_page(rootpage - 1)?;
+
+        match page {
+            Page::LeafTable { cells } => Ok(cells.len()),
+            Page::InteriorTable { .. } => unimplemented!(),
+            _ => Err(anyhow!("Invalid page type"))?,
+        }
+    }
+
+    fn read_page(&self, page_num: usize) -> Result<Page> {
         let mut page = vec![0; self.page_size];
         self.db
             .read_exact_at(&mut page, (page_num * self.page_size) as u64)?;

@@ -1,11 +1,13 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use db::Database;
 use page::Page;
+use sql::parse_select;
 
 mod cell;
 mod db;
 mod page;
 mod record;
+mod sql;
 
 pub const DB_HEADER_SIZE: usize = 100;
 
@@ -25,7 +27,10 @@ fn main() -> Result<()> {
         ".tables" => {
             db.tables()?;
         }
-        _ => bail!("Missing or invalid command passed: {}", command),
+        _ => {
+            let statement = parse_select(command.as_str())?;
+            db.execute_statement(statement)?;
+        }
     }
 
     Ok(())
