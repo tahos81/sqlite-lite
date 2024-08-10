@@ -4,7 +4,7 @@ parser! {
     grammar sql_parser() for str {
         pub rule select() -> Statement
         = ("SELECT" / "select") whitespace() columns:column_list()  whitespace()
-              "FROM" whitespace() table:identifier()
+            ("FROM" / "from") whitespace() table:identifier()
               //where:(whitespace() "WHERE" whitespace() e:expression() { e })?
               { Statement::Select { columns, table } }
 
