@@ -5,7 +5,7 @@ use crate::{
         Kind,
     },
     record::{ColumnType, Record},
-    sql::Statement,
+    sql::{parse_sql, Statement},
     Page, DB_HEADER_SIZE,
 };
 use anyhow::{anyhow, Result};
@@ -54,26 +54,44 @@ impl Database {
 
     pub fn execute_statement(&self, statement: Statement) -> Result<()> {
         match statement {
-            Statement::Select { columns, table } => {
+            Statement::Select { table, columns, .. } => {
                 if columns.len() == 1 && columns[0] == String::from("COUNT(*)") {
                     let count = self.table_row_count(table.as_str())?;
                     println!("{}", count);
+                } else if columns.len() == 1 {
+                    let column = columns[0].as_str();
+                    let schema = self.get_schema(table.as_str())?;
+                    let statement = parse_sql(schema.sql.as_str())?;
+                    if let Statement::CreateTable { table, columns } = statement {
+                        let idx = columns
+                            .iter()
+                            .position(|c| c.name == column)
+                            .ok_or(anyhow!("Column does not exist {column}"))?;
+                        let rootpage = self.get_rootpage(table.as_str())?;
+                        let page = self.read_page(rootpage - 1)?;
+                        match page {
+                            Page::LeafTable { cells } => {
+                                for cell in cells {
+                                    let values = cell.values;
+                                    println!("{}", values[idx]);
+                                }
+                            }
+                            Page::InteriorTable { .. } => unimplemented!(),
+                            _ => Err(anyhow!("Invalid page type"))?,
+                        }
+                    }
                 } else {
-                    unimplemented!("SELECT with specific columns is not implemented yet");
+                    unimplemented!("SELECT with multiple columns is not implemented yet");
                 }
             }
+            _ => unimplemented!(),
         }
 
         Ok(())
     }
 
     fn table_row_count(&self, table_name: &str) -> Result<usize> {
-        let schema = self
-            .schema
-            .iter()
-            .find(|s| s.name == table_name && s.kind == schema::Kind::Table)
-            .ok_or(anyhow!("Table not found"))?;
-        let rootpage = schema.rootpage;
+        let rootpage = self.get_rootpage(table_name)?;
         let page = self.read_page(rootpage - 1)?;
 
         match page {
@@ -81,6 +99,22 @@ impl Database {
             Page::InteriorTable { .. } => unimplemented!(),
             _ => Err(anyhow!("Invalid page type"))?,
         }
+    }
+
+    fn get_schema(&self, table_name: &str) -> Result<&Schema> {
+        self.schema
+            .iter()
+            .find(|s| s.name == table_name && s.kind == schema::Kind::Table)
+            .ok_or(anyhow!("Table not found"))
+    }
+
+    fn get_rootpage(&self, table_name: &str) -> Result<usize> {
+        let schema = self
+            .schema
+            .iter()
+            .find(|s| s.name == table_name && s.kind == schema::Kind::Table)
+            .ok_or(anyhow!("Table not found"))?;
+        Ok(schema.rootpage)
     }
 
     fn read_page(&self, page_num: usize) -> Result<Page> {

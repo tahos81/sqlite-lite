@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use db::Database;
 use page::Page;
-use sql::parse_select;
+use sql::parse_sql;
 
 mod cell;
 mod db;
@@ -28,7 +28,7 @@ fn main() -> Result<()> {
             db.tables()?;
         }
         _ => {
-            let statement = parse_select(command.as_str())?;
+            let statement = parse_sql(command.as_str())?;
             db.execute_statement(statement)?;
         }
     }
