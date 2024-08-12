@@ -72,10 +72,10 @@ pub mod schema {
         Trigger,
     }
 
-    #[allow(dead_code)]
     pub struct Schema {
         pub kind: Kind,
         pub name: String,
+        #[allow(unused)]
         pub tbl_name: String,
         pub rootpage: usize,
         pub sql: String,

@@ -54,34 +54,43 @@ impl Database {
 
     pub fn execute_statement(&self, statement: Statement) -> Result<()> {
         match statement {
-            Statement::Select { table, columns, .. } => {
-                if columns.len() == 1 && columns[0] == String::from("COUNT(*)") {
+            Statement::Select {
+                table,
+                columns: selected_cols,
+                ..
+            } => {
+                if selected_cols.len() == 1 && selected_cols[0] == String::from("COUNT(*)") {
                     let count = self.table_row_count(table.as_str())?;
                     println!("{}", count);
-                } else if columns.len() == 1 {
-                    let column = columns[0].as_str();
+                } else {
                     let schema = self.get_schema(table.as_str())?;
                     let statement = parse_sql(schema.sql.as_str())?;
                     if let Statement::CreateTable { table, columns } = statement {
-                        let idx = columns
+                        let col_idxs: Vec<_> = selected_cols
                             .iter()
-                            .position(|c| c.name == column)
-                            .ok_or(anyhow!("Column does not exist {column}"))?;
+                            .filter_map(|c| columns.iter().position(|col| col.name == *c))
+                            .collect();
+
                         let rootpage = self.get_rootpage(table.as_str())?;
                         let page = self.read_page(rootpage - 1)?;
                         match page {
                             Page::LeafTable { cells } => {
                                 for cell in cells {
                                     let values = cell.values;
-                                    println!("{}", values[idx]);
+                                    let last_col = col_idxs.len() - 1;
+                                    for (idx, col_idx) in col_idxs.iter().enumerate() {
+                                        if idx == last_col {
+                                            println!("{}", values[*col_idx]);
+                                        } else {
+                                            print!("{}|", values[*col_idx]);
+                                        }
+                                    }
                                 }
                             }
                             Page::InteriorTable { .. } => unimplemented!(),
                             _ => Err(anyhow!("Invalid page type"))?,
                         }
                     }
-                } else {
-                    unimplemented!("SELECT with multiple columns is not implemented yet");
                 }
             }
             _ => unimplemented!(),
