@@ -27,8 +27,8 @@ fn main() -> Result<()> {
         ".tables" => {
             db.tables()?;
         }
-        _ => {
-            let statement = parse_sql(command.as_str())?;
+        sql => {
+            let statement = parse_sql(sql)?;
             db.execute_statement(statement)?;
         }
     }

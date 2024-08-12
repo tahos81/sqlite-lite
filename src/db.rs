@@ -5,7 +5,7 @@ use crate::{
         Kind,
     },
     record::{ColumnType, Record},
-    sql::{parse_sql, Statement},
+    sql::{parse_sql, Condition, Statement},
     Page, DB_HEADER_SIZE,
 };
 use anyhow::{anyhow, Result};
@@ -57,10 +57,10 @@ impl Database {
             Statement::Select {
                 table,
                 columns: selected_cols,
-                ..
+                condition,
             } => {
                 if selected_cols.len() == 1 && selected_cols[0] == String::from("COUNT(*)") {
-                    let count = self.table_row_count(table.as_str())?;
+                    let count = self.table_row_count(&table, condition)?;
                     println!("{}", count);
                 } else {
                     let schema = self.get_schema(table.as_str())?;
@@ -75,17 +75,56 @@ impl Database {
                         let page = self.read_page(rootpage - 1)?;
                         match page {
                             Page::LeafTable { cells } => {
-                                for cell in cells {
-                                    let values = cell.values;
-                                    let last_col = col_idxs.len() - 1;
-                                    for (idx, col_idx) in col_idxs.iter().enumerate() {
-                                        if idx == last_col {
-                                            println!("{}", values[*col_idx]);
+                                cells
+                                    .iter()
+                                    .filter(|cell| {
+                                        if let Some(condition) = &condition {
+                                            match condition {
+                                                Condition::Equals { column, value } => {
+                                                    let statement =
+                                                        parse_sql(schema.sql.as_str()).unwrap();
+                                                    let columns = match statement {
+                                                        Statement::CreateTable {
+                                                            columns, ..
+                                                        } => columns,
+                                                        _ => unreachable!(),
+                                                    };
+                                                    let col_idx = columns
+                                                        .iter()
+                                                        .position(|c| c.name == *column)
+                                                        .unwrap();
+                                                    match &cell.values[col_idx] {
+                                                        Record::Text(s) => *s == *value,
+                                                        _ => unimplemented!(),
+                                                    }
+                                                }
+                                            }
                                         } else {
-                                            print!("{}|", values[*col_idx]);
+                                            true
                                         }
-                                    }
-                                }
+                                    })
+                                    .for_each(|cell| {
+                                        let values = &cell.values;
+                                        let last_col = col_idxs.len() - 1;
+                                        for (idx, col_idx) in col_idxs.iter().enumerate() {
+                                            if idx == last_col {
+                                                println!("{}", values[*col_idx]);
+                                            } else {
+                                                print!("{}|", values[*col_idx]);
+                                            }
+                                        }
+                                    });
+                                // for cell in cells {
+                                //     let values = cell.values;
+                                //     let last_col = col_idxs.len() - 1;
+                                //     for (idx, col_idx) in col_idxs.iter().enumerate() {
+                                //         if idx == last_col {
+                                //             println!("{}", values[*col_idx]);
+                                //         } else {
+                                //             print!("{}|", values[*col_idx]);
+                                //         }
+                                //     }
+                                // }
                             }
                             Page::InteriorTable { .. } => unimplemented!(),
                             _ => Err(anyhow!("Invalid page type"))?,
@@ -99,12 +138,39 @@ impl Database {
         Ok(())
     }
 
-    fn table_row_count(&self, table_name: &str) -> Result<usize> {
+    fn table_row_count(&self, table_name: &str, condition: Option<Condition>) -> Result<usize> {
         let rootpage = self.get_rootpage(table_name)?;
         let page = self.read_page(rootpage - 1)?;
+        let schema = self.get_schema(table_name)?;
 
         match page {
-            Page::LeafTable { cells } => Ok(cells.len()),
+            Page::LeafTable { cells } => {
+                let count = cells
+                    .iter()
+                    .filter(|cell| {
+                        if let Some(condition) = &condition {
+                            match condition {
+                                Condition::Equals { column, value } => {
+                                    let statement = parse_sql(schema.sql.as_str()).unwrap();
+                                    let columns = match statement {
+                                        Statement::CreateTable { columns, .. } => columns,
+                                        _ => unreachable!(),
+                                    };
+                                    let col_idx =
+                                        columns.iter().position(|c| c.name == *column).unwrap();
+                                    match &cell.values[col_idx] {
+                                        Record::Text(s) => *s == *value,
+                                        _ => unimplemented!(),
+                                    }
+                                }
+                            }
+                        } else {
+                            true
+                        }
+                    })
+                    .count();
+                Ok(count)
+            }
             Page::InteriorTable { .. } => unimplemented!(),
             _ => Err(anyhow!("Invalid page type"))?,
         }

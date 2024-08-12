@@ -22,7 +22,7 @@ peg::parser! {
             = quiet!{val:$(['a'..='z' | 'A'..='Z' | '0'..='9' | '_']+) { val }}
 
         rule condition() -> Condition
-            = col:column_name() _ "=" _ val:value() {
+        = col:column_name() _ "=" _ "'"? val:value() "'"? {
                 Condition::Equals {
                     column: col.to_string(),
                     value: val.to_string(),
@@ -30,7 +30,7 @@ peg::parser! {
             }
 
         rule select_statement() -> Statement
-            = i("SELECT") _ cols:(("COUNT(*)" / "count(*)") {vec!["COUNT(*)"]}  / column_name() ** (_ "," _)) _ i("FROM") _ table:table_name() _ cond:(_ "WHERE" _ c:condition() { c })? {
+            = i("SELECT") _ cols:(("COUNT(*)" / "count(*)") {vec!["COUNT(*)"]}  / column_name() ** (_ "," _)) _ i("FROM") _ table:table_name() _ cond:(i("WHERE") _ c:condition() { c })? {
                 Statement::Select {
                     table: table.to_string(),
                     columns: cols.into_iter().map(|s| s.to_string()).collect(),
