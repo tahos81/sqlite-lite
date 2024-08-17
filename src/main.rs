@@ -29,7 +29,7 @@ fn main() -> Result<()> {
         }
         sql => {
             let statement = parse_sql(sql)?;
-            db.execute_statement(statement)?;
+            db.execute_statement(&statement)?;
         }
     }
 

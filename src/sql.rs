@@ -6,7 +6,7 @@ peg::parser! {
         rule _() = quiet!{[' ' | '\t' | '\r' | '\n']*}
 
         rule identifier() -> &'input str
-            = quiet!{ident:$(['a'..='z' | 'A'..='Z' | '_']['a'..='z' | 'A'..='Z' | '0'..='9' | '_']*) { ident }}
+            = quiet!{ident:$(['a'..='z' | 'A'..='Z' | '_']['a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '(' | ')' | '*']*) { ident }}
             / expected!("identifier")
 
         rule table_name() -> &'input str = identifier()
@@ -21,16 +21,22 @@ peg::parser! {
         rule value() -> &'input str
             = quiet!{val:$(['a'..='z' | 'A'..='Z' | '0'..='9' | '_']+) { val }}
 
+        rule string_literal() -> &'input str
+            = quiet!{val:$(['a'..='z' | 'A'..='Z' | '0'..='9' | '_' | ' ' | '.' | '-' | '/' | ':' | '(' | ')' | ',' | '\'' | '"' | '*' | '+' | '=' | '?' | '!' | '@' | '#' | '$' | '%' | '^' | '&' | '*' | '[' | ']' | '{' | '}' | '|' | '\\' | '<' | '>' | '~' | '`' | ';' | '\t' | '\r' | '\n']+) { &val[
+                1..val.len()-1
+            ] }}
+
         rule condition() -> Condition
-        = col:column_name() _ "=" _ "'"? val:value() "'"? {
+        = col:column_name() _ "=" _ val:string_literal() {
                 Condition::Equals {
                     column: col.to_string(),
                     value: val.to_string(),
                 }
             }
 
+
         rule select_statement() -> Statement
-            = i("SELECT") _ cols:(("COUNT(*)" / "count(*)") {vec!["COUNT(*)"]}  / column_name() ** (_ "," _)) _ i("FROM") _ table:table_name() _ cond:(i("WHERE") _ c:condition() { c })? {
+            = i("SELECT") _ cols:(column_name() ** (_ "," _)) _ i("FROM") _ table:table_name() _ cond:(i("WHERE") _ c:condition() { c })? {
                 Statement::Select {
                     table: table.to_string(),
                     columns: cols.into_iter().map(|s| s.to_string()).collect(),
@@ -47,7 +53,7 @@ peg::parser! {
             }
 
         rule create_statement() -> Statement
-            = i("CREATE") _ i("TABLE") _ table:table_name() _ "(" _ cols:column_def() ** ([^ ',']* "," _) _ ")" {
+        = i("CREATE") _ i("TABLE") _ "\""? table:table_name() "\""? _ "(" _ cols:column_def() ** ([^ ',']* "," _) _ ")" {
                 Statement::CreateTable {
                     table: table.to_string(),
                     columns: cols,

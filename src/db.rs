@@ -9,6 +9,7 @@ use crate::{
     Page, DB_HEADER_SIZE,
 };
 use anyhow::{anyhow, Result};
+use itertools::Itertools;
 use nom::number::complete::{be_f64, be_i16, be_i24, be_i32, be_i64, be_i8, be_u32};
 use std::{fs::File, os::unix::fs::FileExt};
 
@@ -52,82 +53,30 @@ impl Database {
         Ok(())
     }
 
-    pub fn execute_statement(&self, statement: Statement) -> Result<()> {
+    pub fn execute_statement(&self, statement: &Statement) -> Result<()> {
         match statement {
             Statement::Select {
                 table,
-                columns: selected_cols,
-                condition,
+                columns: selected_columns,
+                ..
             } => {
-                if selected_cols.len() == 1 && selected_cols[0] == String::from("COUNT(*)") {
-                    let count = self.table_row_count(&table, condition)?;
+                let mut results = Vec::new();
+                let rootpage = self.get_rootpage(&table)?;
+                let count = self.execute_select(statement, rootpage, &mut results)?;
+
+                let col_count = selected_columns
+                    .iter()
+                    .filter(|c| c.as_str().to_lowercase() != "count(*)")
+                    .count();
+
+                if selected_columns[0].to_lowercase() == "count(*)" {
                     println!("{}", count);
                 } else {
-                    let schema = self.get_schema(table.as_str())?;
-                    let statement = parse_sql(schema.sql.as_str())?;
-                    if let Statement::CreateTable { table, columns } = statement {
-                        let col_idxs: Vec<_> = selected_cols
-                            .iter()
-                            .filter_map(|c| columns.iter().position(|col| col.name == *c))
-                            .collect();
-
-                        let rootpage = self.get_rootpage(table.as_str())?;
-                        let page = self.read_page(rootpage - 1)?;
-                        match page {
-                            Page::LeafTable { cells } => {
-                                cells
-                                    .iter()
-                                    .filter(|cell| {
-                                        if let Some(condition) = &condition {
-                                            match condition {
-                                                Condition::Equals { column, value } => {
-                                                    let statement =
-                                                        parse_sql(schema.sql.as_str()).unwrap();
-                                                    let columns = match statement {
-                                                        Statement::CreateTable {
-                                                            columns, ..
-                                                        } => columns,
-                                                        _ => unreachable!(),
-                                                    };
-                                                    let col_idx = columns
-                                                        .iter()
-                                                        .position(|c| c.name == *column)
-                                                        .unwrap();
-                                                    match &cell.values[col_idx] {
-                                                        Record::Text(s) => *s == *value,
-                                                        _ => unimplemented!(),
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            true
-                                        }
-                                    })
-                                    .for_each(|cell| {
-                                        let values = &cell.values;
-                                        let last_col = col_idxs.len() - 1;
-                                        for (idx, col_idx) in col_idxs.iter().enumerate() {
-                                            if idx == last_col {
-                                                println!("{}", values[*col_idx]);
-                                            } else {
-                                                print!("{}|", values[*col_idx]);
-                                            }
-                                        }
-                                    });
-                                // for cell in cells {
-                                //     let values = cell.values;
-                                //     let last_col = col_idxs.len() - 1;
-                                //     for (idx, col_idx) in col_idxs.iter().enumerate() {
-                                //         if idx == last_col {
-                                //             println!("{}", values[*col_idx]);
-                                //         } else {
-                                //             print!("{}|", values[*col_idx]);
-                                //         }
-                                //     }
-                                // }
-                            }
-                            Page::InteriorTable { .. } => unimplemented!(),
-                            _ => Err(anyhow!("Invalid page type"))?,
+                    for (idx, res) in results.into_iter().enumerate() {
+                        if (idx + 1) % col_count == 0 {
+                            println!("{}", res);
+                        } else {
+                            print!("{}|", res);
                         }
                     }
                 }
@@ -138,41 +87,82 @@ impl Database {
         Ok(())
     }
 
-    fn table_row_count(&self, table_name: &str, condition: Option<Condition>) -> Result<usize> {
-        let rootpage = self.get_rootpage(table_name)?;
-        let page = self.read_page(rootpage - 1)?;
-        let schema = self.get_schema(table_name)?;
+    fn execute_select(
+        &self,
+        statement: &Statement,
+        page_num: usize,
+        results: &mut Vec<Record>,
+    ) -> Result<usize> {
+        if let Statement::Select {
+            table,
+            columns: selected_cols,
+            condition,
+        } = statement
+        {
+            let mut count = 0;
+            let page = self.read_page(page_num - 1)?;
+            let schema = self.get_schema(&table)?;
+            let create_statement = parse_sql(&schema.sql)?;
+            if let Statement::CreateTable {
+                table: _table,
+                columns,
+            } = create_statement
+            {
+                match page {
+                    Page::LeafTable { cells } => {
+                        let cells = cells
+                            .iter()
+                            .filter(|cell| {
+                                if let Some(condition) = &condition {
+                                    match condition {
+                                        Condition::Equals { column, value } => {
+                                            let col_idx = columns
+                                                .iter()
+                                                .position(|c| c.name == *column)
+                                                .unwrap();
 
-        match page {
-            Page::LeafTable { cells } => {
-                let count = cells
-                    .iter()
-                    .filter(|cell| {
-                        if let Some(condition) = &condition {
-                            match condition {
-                                Condition::Equals { column, value } => {
-                                    let statement = parse_sql(schema.sql.as_str()).unwrap();
-                                    let columns = match statement {
-                                        Statement::CreateTable { columns, .. } => columns,
-                                        _ => unreachable!(),
-                                    };
-                                    let col_idx =
-                                        columns.iter().position(|c| c.name == *column).unwrap();
-                                    match &cell.values[col_idx] {
-                                        Record::Text(s) => *s == *value,
-                                        _ => unimplemented!(),
+                                            match &cell.values[col_idx] {
+                                                Record::Text(s) => *s == *value,
+                                                Record::Null => false,
+                                                _ => unimplemented!(),
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    true
+                                }
+                            })
+                            .collect_vec();
+
+                        for cell in cells {
+                            count += 1;
+                            for col in selected_cols {
+                                match col {
+                                    col if col.to_lowercase().as_str() == "count(*)" => {}
+                                    col => {
+                                        let col_idx = columns
+                                            .iter()
+                                            .position(|c| c.name == *col)
+                                            .ok_or(anyhow!("nonexistent column"))?;
+                                        results.push(cell.values[col_idx].clone());
                                     }
                                 }
                             }
-                        } else {
-                            true
                         }
-                    })
-                    .count();
-                Ok(count)
+                    }
+                    Page::InteriorTable { rmptr, cells } => {
+                        for cell in cells {
+                            count +=
+                                self.execute_select(&statement, cell.left_child as usize, results)?;
+                        }
+                        count += self.execute_select(&statement, rmptr as usize, results)?;
+                    }
+                    _ => Err(anyhow!("Invalid page type"))?,
+                }
             }
-            Page::InteriorTable { .. } => unimplemented!(),
-            _ => Err(anyhow!("Invalid page type"))?,
+            Ok(count)
+        } else {
+            unreachable!()
         }
     }
 
@@ -265,10 +255,14 @@ impl Database {
                         cell = remaining_cell;
                     }
 
-                    for col in col_types {
+                    for (idx, col) in col_types.into_iter().enumerate() {
                         match col {
                             ColumnType::Null => {
-                                values.push(Record::Null);
+                                if idx == 0 {
+                                    values.push(Record::Int64(id as i64));
+                                } else {
+                                    values.push(Record::Null);
+                                }
                             }
                             ColumnType::Int8 => {
                                 let (rem, value) = be_i8::<_, ()>(cell)?;

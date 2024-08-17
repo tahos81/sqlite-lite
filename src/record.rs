@@ -18,7 +18,7 @@ pub enum ColumnType {
     Text(usize),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Record {
     Null,
     Int8(i8),
