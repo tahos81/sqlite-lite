@@ -58,11 +58,38 @@ impl Database {
             Statement::Select {
                 table,
                 columns: selected_columns,
-                ..
+                condition,
             } => {
                 let mut results = Vec::new();
-                let rootpage = self.get_rootpage(&table)?;
-                let count = self.execute_select(statement, rootpage, &mut results)?;
+                let count;
+                match condition {
+                    None => {
+                        let rootpage = self.get_table_rootpage(&table)?;
+                        count = self.execute_select(statement, rootpage, &mut results)?;
+                    }
+                    Some(Condition::Equals { column, value }) => {
+                        let index_rootpage = self.get_index_rootpage(&table, column);
+
+                        match index_rootpage {
+                            Some(rootpage) => {
+                                let mut keys = Vec::new();
+                                self.execute_index(rootpage, value, &mut keys)?;
+                                count = keys.len();
+                                let rootpage = self.get_table_rootpage(&table)?;
+                                self.execute_select_with_index(
+                                    statement,
+                                    rootpage,
+                                    &mut results,
+                                    &keys,
+                                )?;
+                            }
+                            None => {
+                                let rootpage = self.get_table_rootpage(&table)?;
+                                count = self.execute_select(statement, rootpage, &mut results)?;
+                            }
+                        }
+                    }
+                }
 
                 let col_count = selected_columns
                     .iter()
@@ -87,6 +114,133 @@ impl Database {
         Ok(())
     }
 
+    fn execute_index(&self, page_num: usize, value: &String, keys: &mut Vec<usize>) -> Result<()> {
+        let page = self.read_page(page_num)?;
+
+        match page {
+            Page::InteriorIndex { rmptr, cells } => {
+                for cell in cells {
+                    for key in cell.keys.chunks(2) {
+                        if let Record::Text(val) = &key[0] {
+                            if value < val {
+                                self.execute_index(cell.left_child as usize, value, keys)?;
+                            } else if value == val {
+                                match key[1] {
+                                    Record::Int24(rowid) => keys.push(rowid as usize),
+                                    _ => Err(anyhow!("Invalid record type"))?,
+                                }
+                                self.execute_index(cell.left_child as usize, value, keys)?;
+                            }
+                        }
+                    }
+                }
+                self.execute_index(rmptr as usize, value, keys)?;
+            }
+            Page::LeafIndex { cells } => cells.iter().for_each(|c| {
+                for key in c.keys.chunks(2) {
+                    if let Record::Text(val) = &key[0] {
+                        if value == val {
+                            match key[1] {
+                                Record::Int24(rowid) => keys.push(rowid as usize),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }),
+
+            _ => Err(anyhow!("Invalid page type"))?,
+        }
+
+        Ok(())
+    }
+
+    fn execute_select_with_index(
+        &self,
+        statement: &Statement,
+        page_num: usize,
+        results: &mut Vec<Record>,
+        keys: &Vec<usize>,
+    ) -> Result<()> {
+        if let Statement::Select {
+            table,
+            columns: selected_cols,
+            ..
+        } = statement
+        {
+            let page = self.read_page(page_num)?;
+            match page {
+                Page::LeafTable { cells } => {
+                    let schema = self.get_schema(&table)?;
+                    let create_statement = parse_sql(&schema.sql)?;
+                    if let Statement::CreateTable { columns, .. } = create_statement {
+                        let cells = cells
+                            .iter()
+                            .filter(|cell| {
+                                if let Record::Int64(key) = cell.values[0] {
+                                    keys.contains(&(key as usize))
+                                } else {
+                                    false
+                                }
+                            })
+                            .collect_vec();
+
+                        for cell in cells {
+                            for col in selected_cols {
+                                match col {
+                                    col if col.to_lowercase().as_str() == "count(*)" => {}
+                                    col => {
+                                        let col_idx = columns
+                                            .iter()
+                                            .position(|c| c.name == *col)
+                                            .ok_or(anyhow!("nonexistent column"))?;
+                                        results.push(cell.values[col_idx].clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Page::InteriorTable { rmptr, cells } => {
+                    if keys.iter().any(|key| *key < cells[0].row_id as usize) {
+                        self.execute_select_with_index(
+                            statement,
+                            cells[0].left_child as usize,
+                            results,
+                            keys,
+                        )?;
+                    }
+
+                    for two_cell in cells.windows(2) {
+                        if keys.iter().any(|key| {
+                            *key < two_cell[1].row_id as usize
+                                && *key >= two_cell[0].row_id as usize
+                        }) {
+                            self.execute_select_with_index(
+                                statement,
+                                two_cell[1].left_child as usize,
+                                results,
+                                keys,
+                            )?;
+                        }
+                    }
+
+                    if keys
+                        .iter()
+                        .any(|key| *key > cells[cells.len() - 1].row_id as usize)
+                    {
+                        self.execute_select_with_index(statement, rmptr as usize, results, keys)?;
+                    }
+                }
+                _ => unreachable!(),
+            }
+
+            Ok(())
+        } else {
+            unreachable!()
+        }
+    }
+
     fn execute_select(
         &self,
         statement: &Statement,
@@ -100,7 +254,7 @@ impl Database {
         } = statement
         {
             let mut count = 0;
-            let page = self.read_page(page_num - 1)?;
+            let page = self.read_page(page_num)?;
             let schema = self.get_schema(&table)?;
             let create_statement = parse_sql(&schema.sql)?;
             if let Statement::CreateTable {
@@ -122,7 +276,7 @@ impl Database {
                                                 .unwrap();
 
                                             match &cell.values[col_idx] {
-                                                Record::Text(s) => *s == *value,
+                                                Record::Text(s) => s == value,
                                                 Record::Null => false,
                                                 _ => unimplemented!(),
                                             }
@@ -173,7 +327,29 @@ impl Database {
             .ok_or(anyhow!("Table not found"))
     }
 
-    fn get_rootpage(&self, table_name: &str) -> Result<usize> {
+    fn get_index_rootpage(&self, tbl_name: &str, column_name: &str) -> Option<usize> {
+        let index_schemas = self
+            .schema
+            .iter()
+            .filter(|s| s.kind == schema::Kind::Index && s.tbl_name == tbl_name)
+            .collect_vec();
+
+        for schema in index_schemas {
+            let create_statement = parse_sql(&schema.sql);
+
+            if let Ok(Statement::CreateIndex { columns, .. }) = create_statement {
+                for column in columns {
+                    if column == column_name {
+                        return Some(schema.rootpage);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    fn get_table_rootpage(&self, table_name: &str) -> Result<usize> {
         let schema = self
             .schema
             .iter()
@@ -185,9 +361,9 @@ impl Database {
     fn read_page(&self, page_num: usize) -> Result<Page> {
         let mut page = vec![0; self.page_size];
         self.db
-            .read_exact_at(&mut page, (page_num * self.page_size) as u64)?;
+            .read_exact_at(&mut page, ((page_num - 1) * self.page_size) as u64)?;
         let offset = match page_num {
-            0 => DB_HEADER_SIZE,
+            1 => DB_HEADER_SIZE,
             _ => 0,
         };
         let kind = match page[0 + offset] {
@@ -647,7 +823,7 @@ impl DbLoader {
                     }
 
                     match col_types[..] {
-                        [ColumnType::Text(type_len), ColumnType::Text(name_len), ColumnType::Text(tbl_name_len), ColumnType::Int8, ColumnType::Text(sql_len)] =>
+                        [ColumnType::Text(type_len), ColumnType::Text(name_len), ColumnType::Text(tbl_name_len), ColumnType::Int8 | ColumnType::Int24, ColumnType::Text(sql_len)] =>
                         {
                             let (text, cell) = cell.split_at(type_len);
                             let kind = std::str::from_utf8(text)?;
@@ -666,7 +842,17 @@ impl DbLoader {
                             let (text, cell) = cell.split_at(tbl_name_len);
                             let tbl_name = std::str::from_utf8(text)?;
 
-                            let (cell, rootpage) = be_i8::<_, ()>(cell)?;
+                            let (cell, rootpage) = match col_types[3] {
+                                ColumnType::Int8 => {
+                                    let (cell, rootpage) = be_i8::<_, ()>(cell)?;
+                                    (cell, rootpage as usize)
+                                }
+                                ColumnType::Int24 => {
+                                    let (cell, rootpage) = be_i24::<_, ()>(cell)?;
+                                    (cell, rootpage as usize)
+                                }
+                                _ => unreachable!(),
+                            };
 
                             let (text, _) = cell.split_at(sql_len);
                             let sql = std::str::from_utf8(text)?;
@@ -675,7 +861,7 @@ impl DbLoader {
                                 kind,
                                 name: name.to_owned(),
                                 tbl_name: tbl_name.to_owned(),
-                                rootpage: rootpage as usize,
+                                rootpage,
                                 sql: sql.to_owned(),
                             });
                         }
